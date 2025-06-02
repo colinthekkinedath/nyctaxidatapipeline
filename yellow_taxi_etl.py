@@ -76,6 +76,22 @@ def main(*, parquet_path: str, mysql_url: str, mysql_user: str, mysql_pw: str,
                  "tip_pct",
                  F.when(F.col("fare_amount") > 0, F.col("tip_amount") / F.col("fare_amount")),
              )
+             .withColumn(
+                 "avg_speed_mph",
+                 F.when(F.col("trip_minutes") > 0, F.col("trip_distance") / (F.col("trip_minutes") / 60.0))
+             )
+             .withColumn(
+                 "revenue_per_mile",
+                 F.when(F.col("trip_distance") > 0, F.col("fare_amount") / F.col("trip_distance"))
+             )
+             .withColumn(
+                 "distance_category",
+                 F.when(F.col("trip_distance") < 1, "Very Short")
+                  .when(F.col("trip_distance") < 3, "Short")
+                  .when(F.col("trip_distance") < 5, "Medium")
+                  .when(F.col("trip_distance") < 10, "Long")
+                  .otherwise("Very Long")
+             )
              .cache()
     )
 
@@ -113,11 +129,86 @@ def main(*, parquet_path: str, mysql_url: str, mysql_user: str, mysql_pw: str,
     )
 
     # ------------------------------------------------------------------
-    # 5 ▸ Persist to MySQL
+    # 6 ▸ Trip Performance Analytics
+    # ------------------------------------------------------------------
+    trip_performance = (
+        df.groupBy("PULocationID", "pickup_hour", "pickup_dow")
+          .agg(
+              F.avg("trip_minutes").alias("avg_trip_duration"),
+              F.avg("avg_speed_mph").alias("avg_speed"),
+              F.avg("revenue_per_mile").alias("avg_revenue_per_mile"),
+              F.avg("fare_amount").alias("avg_fare"),
+              F.sum("fare_amount").alias("total_revenue"),
+              F.count("*").alias("n_trips"),
+              F.avg("trip_distance").alias("avg_trip_distance"),
+              F.avg("tip_amount").alias("avg_tip"),
+              F.avg("tip_pct").alias("avg_tip_percentage")
+          )
+          .withColumn("is_weekend", F.when(F.col("pickup_dow").isin(1, 7), True).otherwise(False))
+    )
+
+    # ------------------------------------------------------------------
+    # 8 ▸ Popular Routes Analysis
+    # ------------------------------------------------------------------
+    popular_routes = (
+        df.groupBy("PULocationID", "DOLocationID", "pickup_hour")
+          .agg(
+              F.count("*").alias("n_trips"),
+              F.avg("trip_minutes").alias("avg_duration"),
+              F.avg("fare_amount").alias("avg_fare"),
+              F.avg("trip_distance").alias("avg_distance"),
+              F.avg("tip_amount").alias("avg_tip")
+          )
+          .filter(F.col("n_trips") >= 10)  # Only include routes with at least 10 trips
+          .orderBy(F.col("n_trips").desc())
+    )
+
+    # ------------------------------------------------------------------
+    # 9 ▸ Payment Method Analysis
+    # ------------------------------------------------------------------
+    payment_analysis = (
+        df.groupBy("PULocationID", "pickup_hour", "payment_type")
+          .agg(
+              F.count("*").alias("n_trips"),
+              F.avg("fare_amount").alias("avg_fare"),
+              F.avg("tip_amount").alias("avg_tip"),
+              F.avg("tip_pct").alias("avg_tip_percentage"),
+              F.sum("fare_amount").alias("total_revenue")
+          )
+          .withColumn(
+              "payment_method",
+              F.when(F.col("payment_type") == 1, "Credit Card")
+               .when(F.col("payment_type") == 2, "Cash")
+               .when(F.col("payment_type") == 3, "No Charge")
+               .when(F.col("payment_type") == 4, "Dispute")
+               .otherwise("Unknown")
+          )
+    )
+
+    # ------------------------------------------------------------------
+    # 10 ▸ Distance Distribution Analysis
+    # ------------------------------------------------------------------
+    distance_distribution = (
+        df.groupBy("PULocationID", "pickup_hour", "distance_category")
+          .agg(
+              F.count("*").alias("n_trips"),
+              F.avg("fare_amount").alias("avg_fare"),
+              F.avg("trip_minutes").alias("avg_duration"),
+              F.avg("tip_amount").alias("avg_tip"),
+              F.sum("fare_amount").alias("total_revenue")
+          )
+    )
+
+    # ------------------------------------------------------------------
+    # 11 ▸ Persist to MySQL
     # ------------------------------------------------------------------
     _write_mysql(demand_heatmap,  mysql_url, "demand_heatmap",  mysql_user, mysql_pw, mode)
     _write_mysql(tip_trends,      mysql_url, "tip_trends",      mysql_user, mysql_pw, mode)
     _write_mysql(fare_anomalies,  mysql_url, "fare_anomalies",  mysql_user, mysql_pw, "overwrite")
+    _write_mysql(trip_performance, mysql_url, "trip_performance", mysql_user, mysql_pw, mode)
+    _write_mysql(popular_routes, mysql_url, "popular_routes", mysql_user, mysql_pw, mode)
+    _write_mysql(payment_analysis, mysql_url, "payment_analysis", mysql_user, mysql_pw, mode)
+    _write_mysql(distance_distribution, mysql_url, "distance_distribution", mysql_user, mysql_pw, mode)
 
     spark.stop()
 
